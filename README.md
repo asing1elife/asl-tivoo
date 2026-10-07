@@ -1,0 +1,77 @@
+# Tivoo Codex 周额度显示
+
+在 macOS 上读取当前 Codex 登录账户的周剩余额度，通过蓝牙显示到经典 Divoom Tivoo 的 16×16 像素屏。
+
+已在当前设备完成 RFCOMM 状态查询、测试图片发送和真实额度显示。用户已确认百分比显示正常。
+
+## 运行
+
+需要 Python 3.10+、Xcode Command Line Tools、已登录 ChatGPT 账户的 Codex CLI，以及已配对的 Tivoo。
+
+```sh
+./setup.sh
+export TIVOO_MAC='AA:BB:CC:DD:EE:FF'
+.venv/bin/python -m tivoo status
+.venv/bin/python -m tivoo test --remaining 88
+.venv/bin/python -m tivoo quota
+.venv/bin/python -m tivoo once
+.venv/bin/python -m tivoo watch
+```
+
+请将示例蓝牙地址 `AA:BB:CC:DD:EE:FF` 替换为自己的设备地址。
+
+`test` 显示演示数值；`once` 和 `watch` 使用真实额度。设备地址可用全局参数 `--mac` 指定。
+只生成本地预览：`.venv/bin/python -m tivoo once --preview-only`。
+
+## 后台运行
+
+```sh
+.venv/bin/python service.py start --mac AA:BB:CC:DD:EE:FF
+.venv/bin/python service.py status
+.venv/bin/python service.py stop
+.venv/bin/python service.py uninstall
+```
+
+`start` 安装当前用户的 LaunchAgent 并启动，登录后自动运行，无需 sudo。
+`stop` 停止本次运行；`uninstall` 同时移除登录启动配置。
+配置位置：`~/Library/LaunchAgents/local.tivoo.codex-quota.plist`。
+日志：`output/service.log`。移动项目或更换 Codex 安装路径后，需要 uninstall 并重新 start。
+
+每 300 秒查询一次；画面变化才推送，每 30 分钟强制刷新一次以修复设备重启或手动切换画面。
+Mac 睡眠期间暂停；醒来后恢复轮询。设备离线会在下一轮重试。
+
+## 屏幕含义
+
+- 顶部蓝色 W：周额度。
+- 中间数字：剩余百分比，向下取整；底部为 16 格进度条。
+- 剩余至少 30% 为绿色，低于 30% 为黄色，低于 10% 为红色。
+- 右上角橙色感叹号：额度刷新失败，保留的是旧数值。
+- 没有有效数据或旧数据已跨过重置时间：显示问号，不伪造 0% 或 100%。
+
+`output/screen.png` 为 16×16 原图，`output/preview.png` 为放大预览。
+这些文件表示待发送画面；成功以程序日志的设备确认与实机画面为准。
+
+## 实现
+
+Python 负责额度读取、像素绘图和轮询；Objective-C 桥接调用 macOS IOBluetooth RFCOMM 通道 1。
+这台设备可直接通过 `Tivoo-audio` 控制像素屏，无需单独配对 `Tivoo-light`。
+只有收到校验和有效且命令匹配的成功回复，才报告设备确认。
+
+额度通过 `codex app-server` 的 `account/rateLimits/read` 读取，复用本机 Codex 登录。
+不直接读取、复制或保存访问令牌，不执行模型推理，不消耗额度重置机会。
+优先选择 `rateLimitsByLimitId.codex`，按 `windowDurationMins == 10080` 识别周窗口，
+不假定 primary/secondary 的位置，也不把其他模型额度或短周期额度当作周额度。
+可通过全局 `--limit-id` 切换指定额度桶；不存在的额度会报错。
+`CODEX_BIN` 可指定 Codex 可执行文件；继承 `CODEX_HOME`（如已设置）。
+
+官方接口：https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt
+蓝牙协议参考：https://github.com/solar2ain/tivoo-control
+第三方来源见 THIRD_PARTY.md。
+
+## 测试
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+覆盖周窗口选择、多额度桶优先级、数据缺失、像素编码解码、进度条边界、回复校验和、分片和未确认发送。

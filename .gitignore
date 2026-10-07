@@ -1,0 +1,14 @@
+.venv/
+build/
+output/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+.codex/
+auth.json
+*.pem
+*.key
