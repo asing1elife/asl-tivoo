@@ -1,7 +1,6 @@
 .venv/
 build/
-output/*
-!output/preview.gif
+output/
 __pycache__/
 *.pyc
 .env

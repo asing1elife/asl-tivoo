@@ -2,9 +2,10 @@
 
 在 macOS 上读取当前 Codex 登录账户的周剩余额度，通过蓝牙显示到经典 Divoom Tivoo 的 16×16 像素屏。
 
-![Tivoo 额度显示与流动彩虹背景预览](output/preview.gif)
+![Tivoo 额度显示与流动彩虹背景预览](docs/images/demo.gif)
 
-预览为录制时的画面，百分比和重置日期不会在 README 中实时更新。
+演示图片固定存放于 `docs/images/demo.gif`，百分比和重置日期为录制时的画面，不会随程序运行更新。
+如需更新演示图片，可手动将 `output/preview.gif` 复制到该位置。
 
 已在当前设备完成 RFCOMM 状态查询、测试图片发送和真实额度显示。用户已确认百分比显示正常。
 
@@ -70,6 +71,7 @@ Mac 睡眠期间暂停；醒来后恢复轮询。设备离线会在下一轮重�
 
 `output/screen.png` 为 16×16 首帧，`output/preview.png` 为首帧放大预览，`output/preview.gif` 为动画预览。
 这些文件表示待发送画面；成功以程序日志的设备确认与实机画面为准。
+`output/` 为运行时输出目录，已由 Git 忽略，预览刷新不会产生待提交变更。
 
 ## 实现
 
