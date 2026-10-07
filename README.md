@@ -25,6 +25,18 @@ export TIVOO_MAC='AA:BB:CC:DD:EE:FF'
 
 ## 后台运行
 
+运行根目录的交互管理脚本：
+
+```sh
+./status.sh
+```
+
+显示服务状态、PID、运行时长、登录自启配置及最近日志。输入 `1` 启动、`2` 重启、`3` 停止；
+回车刷新状态，`q` 退出菜单。启动和重启复用已保存的设备配置；首次安装时才需要输入蓝牙地址。
+停止仅影响本次登录，保留登录自启配置，音响也会保留最后一次画面。
+
+也可以直接使用命令：
+
 ```sh
 .venv/bin/python service.py start --mac AA:BB:CC:DD:EE:FF
 .venv/bin/python service.py status
