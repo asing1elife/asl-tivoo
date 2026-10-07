@@ -1,41 +1,60 @@
 """Small, deterministic pixel font and Divoom palette encoding."""
 import math
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from PIL import Image
 
-FONT = dict(zip('0123456789%W?', [
+FONT = dict(zip('0123456789%?-', [
     ['111','101','101','101','111'], ['010','110','010','010','111'],
     ['111','001','111','100','111'], ['111','001','111','001','111'],
     ['101','101','111','001','001'], ['111','100','111','001','111'],
     ['111','100','111','101','111'], ['111','001','010','010','010'],
     ['111','101','111','101','111'], ['111','101','111','001','111'],
-    ['101','001','010','100','101'], ['101','101','101','111','101'],
+    ['101','001','010','100','101'],
     ['111','001','011','000','010'],
+    ['000','000','111','000','000'],
+]))
+
+DATE_FONT = dict(zip('0123456789-', [
+    ['111', '101', '111'], ['010', '110', '010'],
+    ['110', '010', '011'], ['110', '011', '110'],
+    ['101', '111', '001'], ['011', '010', '110'],
+    ['100', '111', '111'], ['111', '001', '001'],
+    ['111', '111', '111'], ['111', '111', '001'],
+    ['000', '111', '000'],
 ]))
 
 
-def render(remaining: float | None, stale: bool = False) -> Image.Image:
+def render(remaining: float | None, stale: bool = False, *, resets_at: int | None = None) -> Image.Image:
     image = Image.new('RGB', (16, 16))
-    def text(value, y, color):
-        x = (16 - (4 * len(value) - 1)) // 2
+    def text(value, y, color, x=None, font=FONT):
+        if x is None:
+            x = (16 - (4 * len(value) - 1)) // 2
         for char in value:
-            for dy, row in enumerate(FONT[char]):
+            for dy, row in enumerate(font[char]):
                 for dx, on in enumerate(row):
                     if on == '1':
                         image.putpixel((x + dx, y + dy), color)
             x += 4
-    text('W', 0, (48, 100, 180))
     if remaining is None:
-        text('?', 6, (255, 160, 0))
+        text('?', 1, (255, 160, 0))
     else:
         if not math.isfinite(remaining) or not 0 <= remaining <= 100:
             raise ValueError('Remaining percentage must be between 0 and 100')
         color = (255, 45, 35) if remaining < 10 else ((255, 170, 0) if remaining < 30 else (25, 220, 95))
         # Floor so 99.9% never claims to be completely full.
-        text(f'{math.floor(remaining)}%', 6, color)
+        text(f'{math.floor(remaining)}%', 1, color)
         filled = math.floor(remaining * 16 / 100)
         for x in range(16):
-            for y in (13, 14):
+            for y in (8, 9):
                 image.putpixel((x, y), color if x < filled else (12, 25, 28))
+    if resets_at is None:
+        text('----', 12, (48, 70, 90), font=DATE_FONT)
+    else:
+        reset = datetime.fromtimestamp(resets_at, ZoneInfo('Asia/Shanghai'))
+        # MMDD fits in 15 pixels; tint month/day separately for readability.
+        text(reset.strftime('%m'), 12, (48, 100, 180), x=0, font=DATE_FONT)
+        text(reset.strftime('%d'), 12, (110, 170, 220), x=8, font=DATE_FONT)
     if stale:
         for point in [(15, 0), (15, 1), (15, 3)]:
             image.putpixel(point, (255, 120, 0))

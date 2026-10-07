@@ -22,8 +22,8 @@ def preview(image):
     image.resize((320, 320), resample=0).save(output / 'preview.png')
 
 
-def push(mac, remaining, stale=False):
-    image = render(remaining, stale)
+def push(mac, remaining, stale=False, *, resets_at=None):
+    image = render(remaining, stale, resets_at=resets_at)
     preview(image)
     send(mac, image_payload(image))
 
@@ -54,10 +54,12 @@ def watch(args):
                 stale = True
                 LOG.warning('Quota read failed: %s', exc)
             remaining = last_quota.remaining if last_quota else None
+            resets_at = last_quota.resets_at if last_quota else None
             # Never carry an old percentage across a reset when the fetch fails.
             if stale and last_quota and last_quota.resets_at and time.time() >= last_quota.resets_at:
                 remaining = None
-            image = render(remaining, stale)
+                resets_at = None
+            image = render(remaining, stale, resets_at=resets_at)
             pixels = image.tobytes()
             try:
                 # Periodic refresh repairs power cycles/manual display changes.
@@ -104,9 +106,9 @@ def main():
                 print(json.dumps(dataclasses.asdict(quota)))
             else:
                 if args.preview_only:
-                    preview(render(quota.remaining))
+                    preview(render(quota.remaining, resets_at=quota.resets_at))
                 else:
-                    push(args.mac, quota.remaining)
+                    push(args.mac, quota.remaining, resets_at=quota.resets_at)
                 print(describe(quota))
         else:
             watch(args)

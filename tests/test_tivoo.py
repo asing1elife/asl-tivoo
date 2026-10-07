@@ -44,7 +44,7 @@ class DisplayTests(unittest.TestCase):
         for value in range(101):
             image = render(value)
             self.assertEqual(image.size, (16, 16))
-            active = sum(image.getpixel((x, 13)) != (12, 25, 28) for x in range(16))
+            active = sum(image.getpixel((x, 8)) != (12, 25, 28) for x in range(16))
             self.assertEqual(active, value * 16 // 100)
         for value in (None, 99.9, 0):
             self.assertEqual(render(value, stale=True).getpixel((15, 0)), (255, 120, 0))
