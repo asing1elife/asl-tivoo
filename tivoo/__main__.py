@@ -8,8 +8,8 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .device import ROOT, send
-from .display import image_payload, render
+from .device import ROOT, send, send_session
+from .display import FRAME_DURATION_MS, animation_payloads, rainbow_frames, render
 from .quota import read_quota
 
 LOG = logging.getLogger('tivoo')
@@ -18,14 +18,26 @@ LOG = logging.getLogger('tivoo')
 def preview(image):
     output = ROOT / 'output'
     output.mkdir(exist_ok=True)
-    image.save(output / 'screen.png')
-    image.resize((320, 320), resample=0).save(output / 'preview.png')
+    frames = rainbow_frames(image)
+    frames[0].save(output / 'screen.png')
+    frames[0].resize((320, 320), resample=0).save(output / 'preview.png')
+    enlarged = [frame.resize((320, 320), resample=0) for frame in frames]
+    enlarged[0].save(output / 'preview.gif', save_all=True, append_images=enlarged[1:],
+                     duration=FRAME_DURATION_MS, loop=0, optimize=False)
+    return frames
+
+
+def upload(mac, image):
+    frames = preview(image)
+    payloads = animation_payloads(frames)
+    send_session(mac, payloads)
+    LOG.info('Animation acknowledged: %d frames, %d chunks; device loops locally',
+             len(frames), len(payloads))
 
 
 def push(mac, remaining, stale=False, *, resets_at=None):
     image = render(remaining, stale, resets_at=resets_at)
-    preview(image)
-    send(mac, image_payload(image))
+    upload(mac, image)
 
 
 def describe(quota):
@@ -64,8 +76,7 @@ def watch(args):
             try:
                 # Periodic refresh repairs power cycles/manual display changes.
                 if pixels != last_pixels or time.monotonic() - last_send >= 1800:
-                    preview(image)
-                    send(args.mac, image_payload(image))
+                    upload(args.mac, image)
                     last_pixels, last_send = pixels, time.monotonic()
                     LOG.info('Display acknowledged%s', ' (stale)' if stale else '')
             except Exception as exc:

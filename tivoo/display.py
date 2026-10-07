@@ -1,5 +1,6 @@
 """Small, deterministic pixel font and Divoom palette encoding."""
 import math
+import colorsys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from PIL import Image
@@ -61,13 +62,33 @@ def render(remaining: float | None, stale: bool = False, *, resets_at: int | Non
     return image
 
 
-def image_payload(image: Image.Image) -> bytes:
-    """Static-image command, 256 row-major palette indices packed LSB first.
+FRAME_DURATION_MS = 100
+
+
+def rainbow_frames(image: Image.Image) -> list[Image.Image]:
+    """A dim, seamless rainbow behind the unchanged foreground pixels."""
+    frames = []
+    for phase in range(16):
+        frame = image.copy()
+        for y in range(16):
+            for x in range(16):
+                # Only fill blank pixels, preserving text, bar and stale marker.
+                if image.getpixel((x, y)) == (0, 0, 0):
+                    rgb = colorsys.hsv_to_rgb(((x + y + phase) % 16) / 16, 1, 0.35)
+                    frame.putpixel((x, y), tuple(round(channel * 255) for channel in rgb))
+        frames.append(frame)
+    return frames
+
+
+def image_frame(image: Image.Image, duration_ms: int = 0) -> bytes:
+    """256 row-major palette indices packed LSB first.
 
     Protocol reference: solar2ain/tivoo-control (README declares MIT).
     """
     if image.size != (16, 16):
         raise ValueError('Tivoo requires exactly 16 x 16 pixels')
+    if not 0 <= duration_ms <= 65535:
+        raise ValueError('Frame duration must fit an unsigned 16-bit integer')
     colors, indices = [], []
     for color in image.convert('RGB').get_flattened_data():
         if color not in colors:
@@ -80,7 +101,23 @@ def image_payload(image: Image.Image) -> bytes:
             if index & (1 << bit):
                 pos = i * bits + bit
                 packed[pos // 8] |= 1 << (pos % 8)
-    content = b'\x00\x00\x00' + bytes([len(colors) % 256])
+    content = duration_ms.to_bytes(2, 'little') + b'\x00' + bytes([len(colors) % 256])
     content += bytes(c for rgb in colors for c in rgb) + packed
     frame = b'\xaa' + (len(content) + 3).to_bytes(2, 'little') + content
-    return b'\x44\x00\x0a\x0a\x04' + frame
+    return frame
+
+
+def image_payload(image: Image.Image) -> bytes:
+    return b'\x44\x00\x0a\x0a\x04' + image_frame(image)
+
+
+def animation_payloads(frames: list[Image.Image], duration_ms: int = FRAME_DURATION_MS) -> list[bytes]:
+    """Upload once in 200-byte chunks; the device loops the complete animation."""
+    if not frames or not 1 <= duration_ms <= 65535:
+        raise ValueError('Animation needs frames and a duration of 1..65535 ms')
+    data = b''.join(image_frame(frame, duration_ms) for frame in frames)
+    # The total length is uint16, and the chunk index is uint8.
+    if len(data) > 200 * 256:
+        raise ValueError('Animation exceeds 256 chunks')
+    return [b'\x49' + len(data).to_bytes(2, 'little') + bytes([index]) + data[start:start + 200]
+            for index, start in enumerate(range(0, len(data), 200))]

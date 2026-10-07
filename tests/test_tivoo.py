@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 from PIL import Image
-from tivoo.display import render, image_payload
-from tivoo.device import responses, send
+from tivoo.display import render, image_payload, rainbow_frames, animation_payloads
+from tivoo.device import responses, send, send_session
 from tivoo.quota import select_weekly
 
 
@@ -87,6 +87,71 @@ class BluetoothTests(unittest.TestCase):
         run.return_value.stderr = 'RFCOMM OK'
         with self.assertRaisesRegex(RuntimeError, 'No valid device acknowledgment'):
             send('AA:BB:CC:DD:EE:FF', b'\x44')
+
+    @patch('tivoo.device.subprocess.run')
+    def test_animation_uses_one_completion_ack_for_all_chunks(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stderr = 'RX: 01 05 00 04 49 55 A7 00 02'
+        self.assertEqual(len(send_session('AA:BB:CC:DD:EE:FF', [b'\x49\x00', b'\x49\x01'])), 1)
+        args = run.call_args.args[0]
+        self.assertIn('-s', args)
+        self.assertEqual(args.count('--'), 1)
+        run.return_value.stderr = 'RX: 01 05 00 04 49 55 A8 00 02'
+        with self.assertRaisesRegex(RuntimeError, '0/1 received'):
+            send_session('AA:BB:CC:DD:EE:FF', [b'\x49\x00', b'\x49\x01'])
+        run.return_value.returncode = 2
+        run.return_value.stderr = 'Write failed'
+        with self.assertRaisesRegex(RuntimeError, 'Bluetooth failed'):
+            send_session('AA:BB:CC:DD:EE:FF', [b'\x49\x00', b'\x49\x01'])
+
+
+class AnimationTests(unittest.TestCase):
+    def test_rainbow_fills_blanks_and_preserves_foreground(self):
+        for stale in (False, True):
+            original = render(92, stale, resets_at=1700000000)
+            frames = rainbow_frames(original)
+            self.assertEqual(len(frames), 16)
+            self.assertEqual(len({frame.tobytes() for frame in frames}), 16)
+            for frame in frames:
+                for y in range(16):
+                    for x in range(16):
+                        before = original.getpixel((x, y))
+                        after = frame.getpixel((x, y))
+                        if before == (0, 0, 0):
+                            self.assertGreater(max(after), 0)
+                            self.assertLessEqual(max(after), 89)
+                        else:
+                            self.assertEqual(after, before)
+                if stale:
+                    self.assertEqual(frame.getpixel((15, 0)), (255, 120, 0))
+            # Last phase advances into the first phase without a discontinuity.
+            self.assertEqual(frames[-1].getpixel((1, 0)), frames[0].getpixel((0, 0)))
+
+    def test_chunk_reassembly_and_frame_duration(self):
+        frames = rainbow_frames(render(92))
+        chunks = animation_payloads(frames, 100)
+        data = b''.join(chunk[4:] for chunk in chunks)
+        for index, chunk in enumerate(chunks):
+            self.assertEqual(chunk[0], 0x49)
+            self.assertEqual(chunk[3], index)
+            self.assertEqual(int.from_bytes(chunk[1:3], 'little'), len(data))
+            self.assertLessEqual(len(chunk[4:]), 200)
+        pos = 0
+        for expected in frames:
+            self.assertEqual(data[pos], 0xaa)
+            size = int.from_bytes(data[pos + 1:pos + 3], 'little')
+            frame = bytearray(data[pos:pos + size])
+            self.assertEqual(int.from_bytes(frame[3:5], 'little'), 100)
+            frame[3:5] = b'\x00\x00'
+            self.assertEqual(bytes(frame), image_payload(expected)[5:])
+            pos += size
+        self.assertEqual(pos, len(data))
+
+    def test_invalid_animation_rejected(self):
+        for frames, duration in [([], 100), ([render(92)], 0), ([render(92)], 65536),
+                                 ([render(92)] * 1000, 100)]:
+            with self.assertRaises(ValueError):
+                animation_payloads(frames, duration)
 
 
 if __name__ == '__main__':
