@@ -1,10 +1,25 @@
 """Bounded native Bluetooth bridge calls with validated device acknowledgments."""
+import logging
 import re
 from collections import Counter
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+LOG = logging.getLogger('tivoo.bluetooth')
+
+
+def log_diagnostics(stderr):
+    """Keep connection evidence even on success, without logging image payloads."""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode('utf-8', errors='replace')
+    stderr = stderr or ''
+    for line in stderr.splitlines():
+        if 'BT_DIAG ' in line:
+            LOG.info('Bluetooth: %s', line.split('BT_DIAG ', 1)[1])
+    # Keep native errors useful but bounded; raw TX/RX can be many kilobytes.
+    return '\n'.join(line for line in stderr.splitlines()
+                     if 'TX:' not in line and 'RX:' not in line)[-4000:]
 
 
 def responses(log: str):
@@ -45,10 +60,18 @@ def send_session(mac: str, payloads: list[bytes]):
         if index:
             args.append('--')
         args.append(payload.hex())
-    result = subprocess.run(args, capture_output=True, text=True,
-                            timeout=20 + len(payloads) * 0.1)
+    # Budget for initialization, three native open attempts and retry delays.
+    # The parent also bounds a stuck synchronous macOS Bluetooth call.
+    timeout = 60 + len(payloads) * 0.2
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        detail = log_diagnostics(exc.stderr)
+        raise RuntimeError(f'Bluetooth bridge timed out after {timeout:g}s; '
+                           f'partial diagnostics: {detail or "none"}') from None
+    detail = log_diagnostics(result.stderr)
     if result.returncode:
-        raise RuntimeError(f'Bluetooth failed ({result.returncode}): {result.stderr.strip()}')
+        raise RuntimeError(f'Bluetooth failed ({result.returncode}): {detail.strip()}')
     packets = list(responses(result.stderr))
     expected = Counter(payload[0] for payload in payloads)
     if 0x49 in expected:

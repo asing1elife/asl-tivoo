@@ -23,11 +23,11 @@
 }
 
 - (void)rfcommChannelOpenComplete:(IOBluetoothRFCOMMChannel *)rfcommChannel status:(IOReturn)error {
-    NSLog(@"RFCOMM %@ (err=%d)", error == 0 ? @"OK" : @"FAIL", (int)error);
+    NSLog(@"BT_DIAG stage=open_callback result=%d (0x%08x)", (int)error, (unsigned int)error);
 }
 
 - (void)rfcommChannelClosed:(IOBluetoothRFCOMMChannel *)rfcommChannel {
-    NSLog(@"RFCOMM closed");
+    NSLog(@"BT_DIAG stage=channel_closed");
 }
 
 @end
@@ -70,7 +70,60 @@ static NSData *hexToData(NSString *hex) {
 }
 
 static void runLoopFor(NSTimeInterval t) {
-    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:t]];
+    // Keep dispatching initialization/callback events even if a run-loop source
+    // returns early. A sleep alone does not service IOBluetooth's callbacks.
+    NSTimeInterval deadline = [NSProcessInfo processInfo].systemUptime + t;
+    while ([NSProcessInfo processInfo].systemUptime < deadline) {
+        NSTimeInterval slice = MIN(0.05, deadline - [NSProcessInfo processInfo].systemUptime);
+        if (![[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                     beforeDate:[NSDate dateWithTimeIntervalSinceNow:slice]]) {
+            [NSThread sleepForTimeInterval:MAX(0, slice)];
+        }
+    }
+}
+
+static IOBluetoothRFCOMMChannel *connectRFCOMM(IOBluetoothDevice *dev,
+                                              IOBluetoothHostController *controller,
+                                              TivooDelegate *delegate,
+                                              void (*waitForEvents)(NSTimeInterval)) {
+    // isConnected describes the device link, not readiness of this process's
+    // newly-created Bluetooth client. Always allow initialization events to run.
+    NSLog(@"BT_DIAG stage=initialize wait=1.0s connected=%d", [dev isConnected]);
+    waitForEvents(1.0);
+    if (!controller) {
+        NSLog(@"BT_DIAG stage=initialize failed=no_controller");
+        return nil;
+    }
+    for (NSUInteger poll = 0; [controller powerState] != kBluetoothHCIPowerStateON && poll < 40; poll++) {
+        waitForEvents(0.1);
+    }
+
+    for (NSUInteger attempt = 1; attempt <= 3; attempt++) {
+        BluetoothHCIPowerState power = [controller powerState];
+        NSLog(@"BT_DIAG stage=open attempt=%lu/3 power=%d connected=%d",
+              (unsigned long)attempt, (int)power, [dev isConnected]);
+        if (power != kBluetoothHCIPowerStateON) {
+            NSLog(@"BT_DIAG stage=open failed=controller_not_powered_on");
+            return nil;
+        }
+        IOBluetoothRFCOMMChannel *channel = nil;
+        NSTimeInterval started = [NSProcessInfo processInfo].systemUptime;
+        // This API opens the baseband link too, if necessary. Do not separately
+        // open/reset it: the same device may currently be playing audio.
+        IOReturn err = [dev openRFCOMMChannelSync:&channel withChannelID:1 delegate:delegate];
+        NSLog(@"BT_DIAG stage=open_result attempt=%lu/3 result=%d (0x%08x) channel=%d elapsed=%.3fs connected=%d",
+              (unsigned long)attempt, (int)err, (unsigned int)err, channel != nil,
+              [NSProcessInfo processInfo].systemUptime - started, [dev isConnected]);
+        if (err == kIOReturnSuccess && channel) return channel;
+        if (channel) [channel closeChannel];
+        if (attempt < 3) {
+            NSLog(@"BT_DIAG stage=retry wait=%lus", (unsigned long)attempt);
+            // Retry in this process so initialization progress is retained.
+            waitForEvents((NSTimeInterval)attempt);
+        }
+    }
+    NSLog(@"BT_DIAG stage=open failed=attempts_exhausted");
+    return nil;
 }
 
 static BOOL sendAndRecv(IOBluetoothRFCOMMChannel *ch, NSData *payload, NSTimeInterval wait) {
@@ -81,7 +134,10 @@ static BOOL sendAndRecv(IOBluetoothRFCOMMChannel *ch, NSData *payload, NSTimeInt
     NSLog(@"TX: %@", hex);
 
     IOReturn result = [ch writeSync:(void *)[pkt bytes] length:[pkt length]];
-    if (result != kIOReturnSuccess) { NSLog(@"Write failed: %d", result); return NO; }
+    if (result != kIOReturnSuccess) {
+        NSLog(@"BT_DIAG stage=write result=%d (0x%08x)", (int)result, (unsigned int)result);
+        return NO;
+    }
     runLoopFor(wait);
     return YES;
 }
@@ -100,7 +156,6 @@ int main(int argc, const char *argv[]) {
         }
 
         NSString *macAddress = nil;
-        BOOL sessionMode = NO;
         int startArg = 1;
 
         // Parse flags
@@ -109,7 +164,6 @@ int main(int argc, const char *argv[]) {
                 macAddress = [NSString stringWithUTF8String:argv[startArg + 1]];
                 startArg += 2;
             } else if (strcmp(argv[startArg], "-s") == 0) {
-                sessionMode = YES;
                 startArg += 1;
             } else {
                 break;
@@ -145,19 +199,10 @@ int main(int argc, const char *argv[]) {
         IOBluetoothDevice *dev = [IOBluetoothDevice deviceWithAddressString:macAddress];
         if (!dev) { NSLog(@"设备未找到"); return 1; }
 
-        if (![dev isConnected]) {
-            [dev openConnection];
-            runLoopFor(1.0);
-        }
-
         TivooDelegate *delegate = [[TivooDelegate alloc] init];
-        IOBluetoothRFCOMMChannel *channel = nil;
-        IOReturn err = [dev openRFCOMMChannelSync:&channel withChannelID:1 delegate:delegate];
-
-        if (err != kIOReturnSuccess || !channel) {
-            NSLog(@"RFCOMM 连接失败: %d", (int)err);
-            return 1;
-        }
+        IOBluetoothRFCOMMChannel *channel = connectRFCOMM(dev,
+            [IOBluetoothHostController defaultController], delegate, runLoopFor);
+        if (!channel) return 1;
         runLoopFor(0.3);
 
         // 发送所有 payload

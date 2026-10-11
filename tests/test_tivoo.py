@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from unittest.mock import patch
 from PIL import Image
@@ -72,6 +73,37 @@ class DisplayTests(unittest.TestCase):
 
 
 class BluetoothTests(unittest.TestCase):
+    @patch('tivoo.device.subprocess.run')
+    def test_success_retains_retry_diagnostics_without_payloads(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stderr = ('native BT_DIAG stage=open_result attempt=1/3 result=-1\n'
+                                  'native BT_DIAG stage=retry wait=1s\n'
+                                  'native BT_DIAG stage=open_result attempt=2/3 result=0\n'
+                                  'TX: DE AD BE EF\nRX: 01 05 00 04 44 55 A2 00 02')
+        with self.assertLogs('tivoo.bluetooth', level='INFO') as logs:
+            self.assertEqual(send('AA:BB:CC:DD:EE:FF', b'\x44'), [bytes.fromhex('044455')])
+        self.assertIn('attempt=2/3 result=0', '\n'.join(logs.output))
+        self.assertNotIn('DE AD', '\n'.join(logs.output))
+        self.assertEqual(run.call_count, 1)  # retries belong to the native process
+        self.assertGreaterEqual(run.call_args.kwargs['timeout'], 60)
+
+    @patch('tivoo.device.subprocess.run')
+    def test_timeout_preserves_partial_diagnostics(self, run):
+        run.side_effect = subprocess.TimeoutExpired('bridge', 60,
+            stderr=b'BT_DIAG stage=open attempt=3/3\nTX: DE AD BE EF')
+        with self.assertLogs('tivoo.bluetooth', level='INFO'):
+            with self.assertRaisesRegex(RuntimeError, 'timed out.*attempt=3/3') as error:
+                send('AA:BB:CC:DD:EE:FF', b'\x44')
+        self.assertNotIn('DE AD', str(error.exception))
+
+    @patch('tivoo.device.subprocess.run')
+    def test_failure_does_not_dump_image_payloads(self, run):
+        run.return_value.returncode = 2
+        run.return_value.stderr = 'TX: DE AD BE EF\nRX: 01 02\nWrite failed'
+        with self.assertRaisesRegex(RuntimeError, 'Write failed') as error:
+            send('AA:BB:CC:DD:EE:FF', b'\x44')
+        self.assertNotIn('DE AD', str(error.exception))
+
     def test_actual_device_status_checksum(self):
         log = 'RX: 01 19 00 04 46 55 00 00 00 FF 00 00 64 00 01 0A 64 01 FF 00 00 01 01 00 00 01 8D 03 02'
         self.assertTrue(list(responses(log))[0].startswith(bytes.fromhex('044655')))
