@@ -1,6 +1,6 @@
-# Tivoo Codex 周额度显示
+# Tivoo Codex 额度显示
 
-在 macOS 上读取当前 Codex 登录账户的周剩余额度，通过蓝牙显示到经典 Divoom Tivoo 的 16×16 像素屏。
+在 macOS 上读取当前 Codex 登录账户的周或 5 小时剩余额度，通过蓝牙显示到经典 Divoom Tivoo 的 16×16 像素屏。
 
 ![Tivoo 额度显示与流动彩虹背景预览](docs/images/demo.gif)
 
@@ -28,6 +28,16 @@ export TIVOO_MAC='AA:BB:CC:DD:EE:FF'
 
 `test` 显示演示数值；`once` 和 `watch` 使用真实额度。设备地址可用全局参数 `--mac` 指定。
 
+默认显示周额度；通过全局参数 `--window 5h` 切换为 5 小时额度，`--window weekly` 切回周额度。参数放在子命令之前：
+
+```sh
+.venv/bin/python -m tivoo --window 5h quota
+.venv/bin/python -m tivoo --window 5h once --preview-only
+.venv/bin/python -m tivoo --window 5h watch
+```
+
+无需手动指定 Pro / Plus 套餐，直接读取当前账户所选窗口的真实额度。账户未返回该窗口时会报错，不会用另一窗口的数值代替。
+
 只生成本地预览：
 
 ```sh
@@ -51,10 +61,16 @@ export TIVOO_MAC='AA:BB:CC:DD:EE:FF'
 | `1` | 启动服务 |
 | `2` | 重启服务 |
 | `3` | 停止服务 |
+| `4` | 切换为周额度 |
+| `5` | 切换为 5 小时额度 |
 | 回车 | 刷新状态 |
 | `q` | 退出菜单 |
 
 启动和重启复用已保存的设备配置；首次安装时才需要输入蓝牙地址。
+
+菜单显示当前额度模式。切换会保存到 LaunchAgent 配置；服务运行中会自动重启并立即刷新画面，服务已停止时只保存选择，下次启动生效。
+
+重新加载时，若 launchd 暂时返回错误 5，程序会短暂等待并重试，最多尝试 6 次；切换仍失败时恢复原配置并尝试恢复原服务，无需 sudo。
 
 停止仅影响本次登录，保留登录自启配置，音响也会保留最后一次画面。
 
@@ -65,6 +81,8 @@ export TIVOO_MAC='AA:BB:CC:DD:EE:FF'
 ```sh
 .venv/bin/python service.py start --mac AA:BB:CC:DD:EE:FF
 .venv/bin/python service.py status
+.venv/bin/python service.py switch --window 5h
+.venv/bin/python service.py switch --window weekly
 .venv/bin/python service.py stop
 .venv/bin/python service.py uninstall
 ```
@@ -72,6 +90,7 @@ export TIVOO_MAC='AA:BB:CC:DD:EE:FF'
 - `start`：安装当前用户的 LaunchAgent 并启动，登录后自动运行，无需 sudo。
 - `stop`：停止本次运行。
 - `uninstall`：停止服务，同时移除登录启动配置。
+- `switch --window 5h|weekly`：保存显示窗口，运行中的服务会自动重启。首次安装也可用 `start --mac ADDRESS --window 5h`；之后直接 `start` 会复用保存的配置。
 
 配置与日志位置：
 
@@ -100,9 +119,10 @@ export TIVOO_MAC='AA:BB:CC:DD:EE:FF'
 
 ## 屏幕含义
 
-- 顶部数字：周剩余百分比，向下取整；中间为 16 格进度条。
+- 顶部数字：当前所选窗口的剩余百分比，向下取整；中间为 16 格进度条。
 - 空白像素：35% HSV 明度的流动彩虹背景，每帧 100 毫秒，1.6 秒循环一次；百分比、进度条、日期和异常提示保持原色及位置。
 - 进度条下方：3×3 小号像素字体显示北京时间的重置日期，格式为 `MMDD`（例如 `1014` 表示 10 月 14 日）；月份深蓝、日期浅蓝。
+- 5 小时模式底部改为北京时间的重置时刻 `HH:MM`，小时深蓝、分钟浅蓝；中间冒号用于区分周额度的日期。
 - 重置日期不可用时显示 `----`；旧数据已跨过重置时间且读取失败时，也不再显示旧日期。
 - 剩余至少 30% 为绿色，低于 30% 为黄色，低于 10% 为红色。
 - 右上角橙色感叹号：额度刷新失败，保留的是旧数值。
@@ -141,8 +161,8 @@ Python 负责额度读取、像素绘图和轮询；Objective-C 桥接调用 mac
 额度选择规则：
 
 - 优先选择 `rateLimitsByLimitId.codex`。
-- 按 `windowDurationMins == 10080` 识别周窗口，不假定 primary/secondary 的位置。
-- 不把其他模型额度或短周期额度当作周额度。
+- 按 `windowDurationMins == 10080` 识别周窗口，`300` 识别 5 小时窗口，不假定 primary/secondary 的位置。
+- 不把其他模型额度或其他周期额度当作所选窗口。
 - 可通过全局 `--limit-id` 切换指定额度桶；不存在的额度会报错。
 
 环境变量：
@@ -162,4 +182,4 @@ Python 负责额度读取、像素绘图和轮询；Objective-C 桥接调用 mac
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-覆盖周窗口选择、多额度桶优先级、数据缺失、像素编码解码、进度条边界、回复校验和、分片和未确认发送。
+覆盖周 / 5 小时窗口选择、多额度桶优先级、数据缺失、重置时刻显示、服务切换及配置保留、像素编码解码、进度条边界、回复校验和、分片和未确认发送。

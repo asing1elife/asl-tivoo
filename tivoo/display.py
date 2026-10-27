@@ -26,7 +26,10 @@ DATE_FONT = dict(zip('0123456789-', [
 ]))
 
 
-def render(remaining: float | None, stale: bool = False, *, resets_at: int | None = None) -> Image.Image:
+def render(remaining: float | None, stale: bool = False, *, resets_at: int | None = None,
+           window: str = 'weekly') -> Image.Image:
+    if window not in ('weekly', '5h'):
+        raise ValueError(f'Unknown quota window: {window}')
     image = Image.new('RGB', (16, 16))
     def text(value, y, color, x=None, font=FONT):
         if x is None:
@@ -53,9 +56,12 @@ def render(remaining: float | None, stale: bool = False, *, resets_at: int | Non
         text('----', 12, (48, 70, 90), font=DATE_FONT)
     else:
         reset = datetime.fromtimestamp(resets_at, ZoneInfo('Asia/Shanghai'))
-        # MMDD fits in 15 pixels; tint month/day separately for readability.
-        text(reset.strftime('%m'), 12, (48, 100, 180), x=0, font=DATE_FONT)
-        text(reset.strftime('%d'), 12, (110, 170, 220), x=8, font=DATE_FONT)
+        # MMDD or HH:MM fits in 15 pixels; the colon distinguishes short usage.
+        text(reset.strftime('%H' if window == '5h' else '%m'), 12, (48, 100, 180), x=0, font=DATE_FONT)
+        text(reset.strftime('%M' if window == '5h' else '%d'), 12, (110, 170, 220), x=8, font=DATE_FONT)
+    if window == '5h':
+        for point in ((7, 12), (7, 14)):
+            image.putpixel(point, (110, 170, 220))
     if stale:
         for point in [(15, 0), (15, 1), (15, 3)]:
             image.putpixel(point, (255, 120, 0))

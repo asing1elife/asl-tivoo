@@ -41,6 +41,15 @@ show_status() {
     else
         echo '登录自启：未配置'
     fi
+    if [[ -f "$TIVOO_PLIST" ]]; then
+        local window
+        window="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments' "$TIVOO_PLIST" 2>/dev/null | awk 'previous == "--window" {print $1; exit} {previous = $1}')"
+        if [[ "$window" == 5h ]]; then
+            echo '显示额度：5 小时（底部为重置时刻 HH:MM）'
+        else
+            echo '显示额度：每周（底部为重置日期 MMDD）'
+        fi
+    fi
     printf '日志：%s\n' "$TIVOO_LOG"
     if [[ -s "$TIVOO_LOG" ]]; then
         echo '最近日志（历史记录，不代表此刻已连接音响）：'
@@ -57,7 +66,7 @@ start_service() {
         launchctl kickstart "$TIVOO_TARGET" || return 1
         echo '服务已启动；若原本正在运行，则保持运行。'
     elif [[ -f "$TIVOO_PLIST" ]]; then
-        launchctl bootstrap "$TIVOO_DOMAIN" "$TIVOO_PLIST" || return 1
+        "$TIVOO_ROOT/.venv/bin/python" "$TIVOO_ROOT/service.py" start || return 1
         echo '已使用保存的设备配置启动。'
     else
         if [[ ! -x "$TIVOO_ROOT/.venv/bin/python" || ! -x "$TIVOO_ROOT/build/tivoo_cmd" ]]; then
@@ -74,7 +83,7 @@ start_service() {
 
 while true; do
     show_status
-    printf '\n1 启动\n2 重启\n3 停止\n回车刷新状态，q 退出\n'
+    printf '\n1 启动\n2 重启\n3 停止\n4 切换为周额度\n5 切换为 5 小时额度\n回车刷新状态，q 退出\n'
     read -r -p '请选择：' choice || { printf '\n'; break; }
     case "$choice" in
         1)
@@ -105,8 +114,16 @@ while true; do
                 echo '服务已经停止。'
             fi
             ;;
+        4|5)
+            if [[ "$choice" == 4 ]]; then
+                window=weekly
+            else
+                window=5h
+            fi
+            "$TIVOO_ROOT/.venv/bin/python" "$TIVOO_ROOT/service.py" switch --window "$window" || echo '切换失败，请查看上方错误。' >&2
+            ;;
         '') ;;
         q|Q|0) break ;;
-        *) echo '请输入 1、2、3；回车刷新，q 退出。' ;;
+        *) echo '请输入 1、2、3、4、5；回车刷新，q 退出。' ;;
     esac
 done

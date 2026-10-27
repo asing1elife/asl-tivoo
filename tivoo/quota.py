@@ -12,13 +12,22 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
-class WeeklyQuota:
+class Quota:
     remaining: float
     resets_at: int | None
     limit_id: str
+    window: str = 'weekly'
 
 
-def select_weekly(result: dict, limit_id: str = 'codex') -> WeeklyQuota:
+WINDOW_MINUTES = {'weekly': 10080, '5h': 300}
+
+# Keep the original public name available for existing callers.
+WeeklyQuota = Quota
+
+
+def select_quota(result: dict, limit_id: str = 'codex', window: str = 'weekly') -> Quota:
+    if window not in WINDOW_MINUTES:
+        raise ValueError(f'Unknown quota window: {window}')
     buckets = result.get('rateLimitsByLimitId')
     if buckets:
         bucket = buckets.get(limit_id)
@@ -29,17 +38,22 @@ def select_weekly(result: dict, limit_id: str = 'codex') -> WeeklyQuota:
     if not bucket:
         raise ValueError(f'No quota bucket: {limit_id}')
     windows = [bucket.get(key) for key in ('primary', 'secondary')]
-    weekly = [w for w in windows if w and w.get('windowDurationMins') == 7 * 24 * 60]
-    if len(weekly) != 1:
-        raise ValueError('Expected one explicit 10080-minute weekly window')
-    window = weekly[0]
-    used = window.get('usedPercent')
+    minutes = WINDOW_MINUTES[window]
+    matching = [w for w in windows if w and w.get('windowDurationMins') == minutes]
+    if len(matching) != 1:
+        raise ValueError(f'Expected one explicit {minutes}-minute {window} window')
+    selected = matching[0]
+    used = selected.get('usedPercent')
     if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
-        raise ValueError('Weekly usedPercent is unavailable')
-    reset = window.get('resetsAt')
+        raise ValueError(f'{window} usedPercent is unavailable')
+    reset = selected.get('resetsAt')
     if reset is not None and (isinstance(reset, bool) or not isinstance(reset, int)):
-        raise ValueError('Invalid weekly reset timestamp')
-    return WeeklyQuota(max(0, min(100, 100 - used)), reset, limit_id)
+        raise ValueError(f'Invalid {window} reset timestamp')
+    return Quota(max(0, min(100, 100 - used)), reset, limit_id, window)
+
+
+def select_weekly(result: dict, limit_id: str = 'codex') -> Quota:
+    return select_quota(result, limit_id)
 
 
 def codex_binary() -> str:
@@ -124,6 +138,6 @@ class AppServer:
             self.proc.stdout.close()
 
 
-def read_quota(limit_id='codex'):
+def read_quota(limit_id='codex', window='weekly'):
     with AppServer() as server:
-        return select_weekly(server.call('account/rateLimits/read'), limit_id)
+        return select_quota(server.call('account/rateLimits/read'), limit_id, window)

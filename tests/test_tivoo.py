@@ -1,10 +1,14 @@
 import subprocess
+import plistlib
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 from PIL import Image
 from tivoo.display import render, image_payload, rainbow_frames, animation_payloads
 from tivoo.device import responses, send, send_session
-from tivoo.quota import select_weekly
+from tivoo.quota import select_weekly, select_quota
+import service
 
 
 def window(used=8, minutes=10080):
@@ -12,6 +16,23 @@ def window(used=8, minutes=10080):
 
 
 class QuotaTests(unittest.TestCase):
+    def test_short_window_selected_by_duration_not_position(self):
+        for a, b in [(window(73, 300), window(20)), (window(20), window(73, 300))]:
+            value = select_quota({'rateLimitsByLimitId': {'codex': {'primary': a, 'secondary': b}}}, window='5h')
+            self.assertEqual(value.remaining, 27)
+            self.assertEqual(value.window, '5h')
+
+    def test_short_window_missing_or_ambiguous_never_falls_back(self):
+        for bucket in ({'primary': window()},
+                       {'primary': window(20, 300), 'secondary': window(70, 300)}):
+            with self.assertRaisesRegex(ValueError, '300-minute'):
+                select_quota({'rateLimits': bucket}, window='5h')
+
+    def test_short_window_invalid_data_rejected(self):
+        for used in (None, True, '8', float('nan')):
+            with self.assertRaises(ValueError):
+                select_quota({'rateLimits': {'primary': window(used, 300)}}, window='5h')
+
     def test_weekly_selected_by_duration_not_position(self):
         for a, b in [(window(), window(90, 300)), (window(90, 300), window())]:
             value = select_weekly({'rateLimitsByLimitId': {'codex': {'primary': a, 'secondary': b}}})
@@ -41,6 +62,19 @@ class QuotaTests(unittest.TestCase):
 
 
 class DisplayTests(unittest.TestCase):
+    def test_short_window_uses_beijing_time_and_colon(self):
+        # 1700000000 is 06:13 on the following day in Beijing.
+        from tivoo.display import DATE_FONT
+        image = render(50, resets_at=1700000000, window='5h')
+        for char, x in zip('0613', (0, 4, 8, 12)):
+            color = (48, 100, 180) if x < 8 else (110, 170, 220)
+            for dy, row in enumerate(DATE_FONT[char]):
+                for dx, on in enumerate(row):
+                    self.assertEqual(image.getpixel((x + dx, 12 + dy)), color if on == '1' else (0, 0, 0))
+        for reset in (None, 1700000000):
+            self.assertEqual(render(50, resets_at=reset, window='5h').getpixel((7, 12)), (110, 170, 220))
+            self.assertEqual(render(50, resets_at=reset).getpixel((7, 12)), (0, 0, 0))
+
     def test_all_percentages_fit_and_have_correct_bar(self):
         for value in range(101):
             image = render(value)
@@ -70,6 +104,68 @@ class DisplayTests(unittest.TestCase):
     def test_invalid_images_rejected(self):
         with self.assertRaises(ValueError):
             image_payload(Image.new('RGB', (32, 32)))
+
+
+class ServiceTests(unittest.TestCase):
+    @patch.object(service.time, 'sleep')
+    @patch.object(service.subprocess, 'run')
+    def test_bootstrap_retries_transient_teardown_error(self, run, sleep):
+        run.side_effect = [subprocess.CompletedProcess([], code, '', 'Input/output error')
+                           for code in (5, 5, 0)]
+        service.bootstrap()
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.25, 0.5])
+
+    @patch.object(service.time, 'sleep')
+    @patch.object(service.subprocess, 'run')
+    def test_bootstrap_retry_is_bounded_and_other_errors_fail_immediately(self, run, sleep):
+        for code, attempts in ((5, 6), (78, 1)):
+            run.reset_mock()
+            run.return_value = subprocess.CompletedProcess([], code, '', 'test failure')
+            with self.assertRaisesRegex(RuntimeError, f'exit {code}'):
+                service.bootstrap()
+            self.assertEqual(run.call_count, attempts)
+
+    def test_failed_switch_restores_previous_configuration_and_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'service.plist'
+            original = plistlib.dumps({'ProgramArguments': ['python', '-m', 'tivoo', 'watch']})
+            path.write_bytes(original)
+            with patch.object(service, 'PLIST', path), patch.object(service, 'bootstrap') as bootstrap, \
+                    patch.object(service.subprocess, 'run'):
+                bootstrap.side_effect = [RuntimeError('load failed'), None]
+                with self.assertRaisesRegex(RuntimeError, '已恢复原配置和服务状态'):
+                    service.save_window(plistlib.loads(original), '5h', True)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(bootstrap.call_count, 2)
+
+    def test_switch_preserves_configuration_and_stopped_state(self):
+        for loaded in (False, True):
+            with self.subTest(loaded=loaded), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'service.plist'
+                original = {'ProgramArguments': ['python', '-m', 'tivoo', '--mac', 'AA:BB:CC:DD:EE:FF',
+                                                  '--limit-id', 'codex', 'watch', '--interval', '60'],
+                            'EnvironmentVariables': {'CODEX_BIN': '/custom/codex'}, 'KeepAlive': True}
+                path.write_bytes(plistlib.dumps(original))
+                with patch.object(service, 'PLIST', path), patch.object(service, 'running') as running, \
+                        patch.object(service.subprocess, 'run') as run, \
+                        patch('sys.argv', ['service.py', 'switch', '--window', '5h']):
+                    running.return_value.returncode = 0 if loaded else 1
+                    run.return_value.returncode = 0
+                    service.main()
+                    self.assertEqual(run.call_count, 2 if loaded else 0)
+                    if loaded:
+                        self.assertEqual(run.call_args_list[0].args[0], ['launchctl', 'bootout', service.TARGET])
+                        self.assertEqual(run.call_args_list[1].args[0], ['launchctl', 'bootstrap', service.DOMAIN, str(path)])
+                updated = plistlib.loads(path.read_bytes())
+                self.assertEqual(service.configured_window(updated), '5h')
+                service.set_window(updated, 'weekly')
+                self.assertEqual(updated['ProgramArguments'].count('--window'), 1)
+                self.assertEqual(service.configured_window(updated), 'weekly')
+                args = updated['ProgramArguments']
+                index = args.index('--window')
+                del args[index:index + 2]
+                self.assertEqual(updated, original)
 
 
 class BluetoothTests(unittest.TestCase):

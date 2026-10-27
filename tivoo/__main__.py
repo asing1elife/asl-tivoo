@@ -35,14 +35,15 @@ def upload(mac, image):
              len(frames), len(payloads))
 
 
-def push(mac, remaining, stale=False, *, resets_at=None):
-    image = render(remaining, stale, resets_at=resets_at)
+def push(mac, remaining, stale=False, *, resets_at=None, window='weekly'):
+    image = render(remaining, stale, resets_at=resets_at, window=window)
     upload(mac, image)
 
 
 def describe(quota):
     reset = datetime.fromtimestamp(quota.resets_at, ZoneInfo('Asia/Shanghai')).isoformat() if quota.resets_at else 'unknown'
-    return f'Weekly remaining: {quota.remaining:g}%; reset: {reset}'
+    label = '5-hour' if quota.window == '5h' else 'Weekly'
+    return f'{label} remaining: {quota.remaining:g}%; reset: {reset}'
 
 
 def watch(args):
@@ -60,7 +61,7 @@ def watch(args):
         while True:
             stale = False
             try:
-                last_quota = read_quota(args.limit_id)
+                last_quota = read_quota(args.limit_id, args.window)
                 LOG.info(describe(last_quota))
             except Exception as exc:
                 stale = True
@@ -71,7 +72,7 @@ def watch(args):
             if stale and last_quota and last_quota.resets_at and time.time() >= last_quota.resets_at:
                 remaining = None
                 resets_at = None
-            image = render(remaining, stale, resets_at=resets_at)
+            image = render(remaining, stale, resets_at=resets_at, window=args.window)
             pixels = image.tobytes()
             try:
                 # Periodic refresh repairs power cycles/manual display changes.
@@ -86,12 +87,14 @@ def watch(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Codex weekly remaining quota on Tivoo')
+    parser = argparse.ArgumentParser(description='Codex remaining quota on Tivoo')
     parser.add_argument('--mac', default=os.environ.get('TIVOO_MAC'))
     parser.add_argument('--limit-id', default='codex')
+    parser.add_argument('--window', choices=('weekly', '5h'), default='weekly',
+                        help='Usage window to display (default: weekly)')
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('status', help='Query screen state without changing the display')
-    sub.add_parser('quota', help='Read weekly quota without Bluetooth')
+    sub.add_parser('quota', help='Read selected quota without Bluetooth')
     test = sub.add_parser('test', help='Send a sample percentage (not real quota)')
     test.add_argument('--remaining', type=float, default=88)
     once = sub.add_parser('once', help='Read real quota and update the screen once')
@@ -109,17 +112,17 @@ def main():
         if args.command == 'status':
             print(json.dumps({'responses': [p.hex() for p in send(args.mac, b'\x46')]}))
         elif args.command == 'test':
-            push(args.mac, args.remaining)
+            push(args.mac, args.remaining, window=args.window)
             print(f'Test image {args.remaining:g}% acknowledged (sample data)')
         elif args.command in ('quota', 'once'):
-            quota = read_quota(args.limit_id)
+            quota = read_quota(args.limit_id, args.window)
             if args.command == 'quota':
                 print(json.dumps(dataclasses.asdict(quota)))
             else:
                 if args.preview_only:
-                    preview(render(quota.remaining, resets_at=quota.resets_at))
+                    preview(render(quota.remaining, resets_at=quota.resets_at, window=quota.window))
                 else:
-                    push(args.mac, quota.remaining, resets_at=quota.resets_at)
+                    push(args.mac, quota.remaining, resets_at=quota.resets_at, window=quota.window)
                 print(describe(quota))
         else:
             watch(args)
